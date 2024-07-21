@@ -71,9 +71,9 @@ func TestParseServiceMethod(t *testing.T) {
 	// testParseServiceMethodSuccess(t, ".Service.Method", "", "Service", "Method")
 	// testParseServiceMethodSuccess(t, "Service/Method", "", "Service", "Method")
 	// testParseServiceMethodSuccess(t, ".Service/Method", "", "Service", "Method")
-	// testParseServiceMethodError(t, "")
-	// testParseServiceMethodError(t, ".")
-	// testParseServiceMethodError(t, "package/Service/Method")
+	testParseServiceMethodError(t, "")
+	testParseServiceMethodError(t, ".")
+	testParseServiceMethodError(t, "package/Service/Method")
 }
 
 func testParseServiceMethodSuccess(t *testing.T, svcAndMethod string, expectedPkg string, expectedService string, expectedMethod string) {
@@ -148,7 +148,7 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 		mtd, err := GetMethodDescFromReflect("connectrpc.eliza.v1.ElizaService.Say", refClient)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
-		assert.Equal(t, "Say", mtd.GetName())
+		assert.Equal(t, "Say", string(mtd.Name()))
 	})
 
 	t.Run("test known call", func(t *testing.T) {
@@ -157,7 +157,7 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 		mtd, err := GetMethodDescFromReflect("helloworld.Greeter.SayHello", refClient)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
-		assert.Equal(t, "SayHello", mtd.GetName())
+		assert.Equal(t, "SayHello", string(mtd.Name()))
 	})
 
 	t.Run("test known call with /", func(t *testing.T) {
@@ -166,7 +166,7 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 		mtd, err := GetMethodDescFromReflect("helloworld.Greeter/SayHello", refClient)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
-		assert.Equal(t, "SayHello", mtd.GetName())
+		assert.Equal(t, "SayHello", string(mtd.Name()))
 	})
 
 	t.Run("test unknown known call", func(t *testing.T) {
