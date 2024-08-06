@@ -1,6 +1,7 @@
 package protodescv2
 
 import (
+	"context"
 	"crypto/tls"
 	"net"
 	"net/http"
@@ -144,8 +145,9 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 
 	t.Run("test connect rpc demo", func(t *testing.T) {
 		refClient := grpcreflect.NewClient(http.DefaultClient, "https://demo.connectrpc.com")
-
-		mtd, err := GetMethodDescFromReflect("connectrpc.eliza.v1.ElizaService.Say", refClient)
+		stream := refClient.NewStream(context.Background())
+		defer stream.Close()
+		mtd, err := GetMethodDescFromReflect("connectrpc.eliza.v1.ElizaService.Say", stream)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
 		assert.Equal(t, "Say", string(mtd.Name()))
@@ -153,8 +155,9 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 
 	t.Run("test known call", func(t *testing.T) {
 		refClient := grpcreflect.NewClient(newInsecureClient(), "http://"+internal.TestLocalhost, connect.WithGRPC())
-
-		mtd, err := GetMethodDescFromReflect("helloworld.Greeter.SayHello", refClient)
+		stream := refClient.NewStream(context.Background())
+		defer stream.Close()
+		mtd, err := GetMethodDescFromReflect("helloworld.Greeter.SayHello", stream)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
 		assert.Equal(t, "SayHello", string(mtd.Name()))
@@ -162,8 +165,9 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 
 	t.Run("test known call with /", func(t *testing.T) {
 		refClient := grpcreflect.NewClient(newInsecureClient(), "http://"+internal.TestLocalhost, connect.WithGRPC())
-
-		mtd, err := GetMethodDescFromReflect("helloworld.Greeter/SayHello", refClient)
+		stream := refClient.NewStream(context.Background())
+		defer stream.Close()
+		mtd, err := GetMethodDescFromReflect("helloworld.Greeter/SayHello", stream)
 		assert.NoError(t, err)
 		assert.NotNil(t, mtd)
 		assert.Equal(t, "SayHello", string(mtd.Name()))
@@ -171,8 +175,9 @@ func TestProtodesc_GetMethodDescFromReflect(t *testing.T) {
 
 	t.Run("test unknown known call", func(t *testing.T) {
 		refClient := grpcreflect.NewClient(newInsecureClient(), "http://"+internal.TestLocalhost, connect.WithGRPC())
-
-		mtd, err := GetMethodDescFromReflect("helloworld.Greeter/SayHelloAsdf", refClient)
+		stream := refClient.NewStream(context.Background())
+		defer stream.Close()
+		mtd, err := GetMethodDescFromReflect("helloworld.Greeter/SayHelloAsdf", stream)
 		assert.Error(t, err)
 		assert.Nil(t, mtd)
 	})

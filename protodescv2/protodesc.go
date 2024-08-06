@@ -1,7 +1,6 @@
 package protodescv2
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -108,14 +107,13 @@ func GetMethodDescFromProtoSetBinary(call string, b []byte) (protoreflect.Method
 }
 
 // GetMethodDescFromReflect gets method descriptor for the call from reflection using client
-func GetMethodDescFromReflect(call string, client *grpcreflect.Client) (protoreflect.MethodDescriptor, error) {
+func GetMethodDescFromReflect(call string, stream *grpcreflect.ClientStream) (protoreflect.MethodDescriptor, error) {
 	call = strings.Replace(call, "/", ".", -1)
 	pkg, svc, _, err := parsePkgServiceMethod(call)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse %q: %v", call, err)
 	}
-	stream := client.NewStream(context.Background())
-	defer stream.Close()
+
 	fileResults, err := stream.FileContainingSymbol(protoreflect.FullName(pkg + "." + svc))
 	if err != nil || fileResults == nil {
 		return nil, reflectionSupport(err)
