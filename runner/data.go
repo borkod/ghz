@@ -4,16 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"text/template"
 
 	"github.com/golang/protobuf/jsonpb"
-	"github.com/golang/protobuf/proto"
-	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // TODO move to own pacakge?
@@ -32,17 +31,17 @@ var ErrLastMessage = errors.New("last message")
 // DataProviderFunc is the interface for providing data for calls
 // For unary and server streaming calls it should return an array with a single element
 // For client and bidi streaming calls it should return an array of messages to be used
-type DataProviderFunc func(*CallData) ([]*dynamic.Message, error)
+type DataProviderFunc func(*CallData) ([]*dynamicpb.Message, error)
 
 // MetadataProviderFunc is the interface for providing metadadata for calls
 type MetadataProviderFunc func(*CallData) (*metadata.MD, error)
 
 // StreamMessageProviderFunc is the interface for providing a message for every message send in the course of a streaming call
-type StreamMessageProviderFunc func(*CallData) (*dynamic.Message, error)
+type StreamMessageProviderFunc func(*CallData) (*dynamicpb.Message, error)
 
 // StreamRecvMsgInterceptFunc is an interface for function invoked when we receive a stream message
 // Clients can return ErrEndStream to end the call early
-type StreamRecvMsgInterceptFunc func(*dynamic.Message, error) error
+type StreamRecvMsgInterceptFunc func(*dynamicpb.Message, error) error
 
 // StreamInterceptorProviderFunc is an interface for a function invoked to generate a stream interceptor
 type StreamInterceptorProviderFunc func(*CallData) StreamInterceptor
@@ -50,14 +49,14 @@ type StreamInterceptorProviderFunc func(*CallData) StreamInterceptor
 // StreamInterceptor is an interface for sending and receiving stream messages.
 // The interceptor can keep shared state for the send and receive calls.
 type StreamInterceptor interface {
-	Recv(*dynamic.Message, error) error
-	Send(*CallData) (*dynamic.Message, error)
+	Recv(*dynamicpb.Message, error) error
+	Send(*CallData) (*dynamicpb.Message, error)
 }
 
 type dataProvider struct {
 	binary   bool
 	data     []byte
-	mtd      *desc.MethodDescriptor
+	mtd      protoreflect.MethodDescriptor
 	dataFunc BinaryDataFunc
 
 	arrayJSONData []string
@@ -65,7 +64,7 @@ type dataProvider struct {
 
 	// cached messages only for binary
 	mutex          sync.RWMutex
-	cachedMessages []*dynamic.Message
+	cachedMessages []*dynamicpb.Message
 }
 
 type mdProvider struct {
@@ -73,7 +72,7 @@ type mdProvider struct {
 	preseed  metadata.MD
 }
 
-func newDataProvider(mtd *desc.MethodDescriptor,
+func newDataProvider(mtd protoreflect.MethodDescriptor,
 	binary bool, dataFunc BinaryDataFunc, data []byte,
 	withFuncs, withTemplateData bool, funcs template.FuncMap) (*dataProvider, error) {
 
@@ -125,7 +124,7 @@ func newDataProvider(mtd *desc.MethodDescriptor,
 	if !ha {
 		if len(dp.arrayJSONData) > 0 {
 			dp.mutex.Lock()
-			dp.cachedMessages = make([]*dynamic.Message, len(dp.arrayJSONData))
+			dp.cachedMessages = make([]*dynamicpb.Message, len(dp.arrayJSONData))
 			dp.mutex.Unlock()
 		}
 
@@ -139,12 +138,12 @@ func newDataProvider(mtd *desc.MethodDescriptor,
 	return &dp, nil
 }
 
-func (dp *dataProvider) getDataForCall(ctd *CallData) ([]*dynamic.Message, error) {
-	var inputs []*dynamic.Message
+func (dp *dataProvider) getDataForCall(ctd *CallData) ([]*dynamicpb.Message, error) {
+	var inputs []*dynamicpb.Message
 	var err error
 
 	// try the optimized path for JSON data for non client-streaming
-	if !dp.binary && !dp.mtd.IsClientStreaming() && len(dp.arrayJSONData) > 0 {
+	if !dp.binary && !dp.mtd.IsStreamingClient() && len(dp.arrayJSONData) > 0 {
 		indx := int(ctd.RequestNumber % int64(len(dp.arrayJSONData))) // we want to start from inputs[0] so dec reqNum
 
 		if inputs, err = dp.getMessages(ctd, indx, []byte(dp.arrayJSONData[indx])); err != nil {
@@ -154,18 +153,18 @@ func (dp *dataProvider) getDataForCall(ctd *CallData) ([]*dynamic.Message, error
 		return nil, err
 	}
 
-	if !dp.mtd.IsClientStreaming() && len(inputs) > 0 {
+	if !dp.mtd.IsStreamingClient() && len(inputs) > 0 {
 		inputIdx := int(ctd.RequestNumber % int64(len(inputs)))
 		unaryInput := inputs[inputIdx]
 
-		return []*dynamic.Message{unaryInput}, nil
+		return []*dynamicpb.Message{unaryInput}, nil
 	}
 
 	return inputs, nil
 }
 
-func (dp *dataProvider) getMessages(ctd *CallData, i int, inputData []byte) ([]*dynamic.Message, error) {
-	var inputs []*dynamic.Message
+func (dp *dataProvider) getMessages(ctd *CallData, i int, inputData []byte) ([]*dynamicpb.Message, error) {
+	var inputs []*dynamicpb.Message
 	var err error
 
 	dp.mutex.RLock()
@@ -201,7 +200,7 @@ func (dp *dataProvider) getMessages(ctd *CallData, i int, inputData []byte) ([]*
 				dp.cachedMessages = inputs
 			} else {
 				if i >= cap(dp.cachedMessages) {
-					nc := make([]*dynamic.Message, len(dp.cachedMessages), (cap(dp.cachedMessages) + i + 1))
+					nc := make([]*dynamicpb.Message, len(dp.cachedMessages), (cap(dp.cachedMessages) + i + 1))
 					copy(nc, dp.cachedMessages)
 					dp.cachedMessages = nc
 				}
@@ -234,7 +233,7 @@ func (dp *dataProvider) getMessages(ctd *CallData, i int, inputData []byte) ([]*
 	return inputs, nil
 }
 
-func newMetadataProvider(mtd *desc.MethodDescriptor, mdData []byte, withFuncs, withTemplateData bool, funcs template.FuncMap) (*mdProvider, error) {
+func newMetadataProvider(mtd protoreflect.MethodDescriptor, mdData []byte, withFuncs, withTemplateData bool, funcs template.FuncMap) (*mdProvider, error) {
 	// Test if we can preseed data
 	ctd := newCallData(mtd, "", 0, withFuncs, withTemplateData, funcs)
 	ha, err := ctd.hasAction(string(mdData))
@@ -278,13 +277,13 @@ func (dp *mdProvider) getMetadataForCall(ctd *CallData) (*metadata.MD, error) {
 // creates a message from a map
 // marshal to JSON then use jsonpb to marshal to message
 // this way we follow protobuf more closely and allow camelCase properties.
-func messageFromMap(input *dynamic.Message, data *map[string]interface{}) error {
+func messageFromMap(input *dynamicpb.Message, data *map[string]interface{}) error {
 	strData, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
 
-	err = jsonpb.UnmarshalString(string(strData), input)
+	err = proto.Unmarshal(strData, input)
 	if err != nil {
 		return err
 	}
@@ -292,38 +291,38 @@ func messageFromMap(input *dynamic.Message, data *map[string]interface{}) error 
 	return nil
 }
 
-func createPayloadsFromJSON(data string, mtd *desc.MethodDescriptor) ([]*dynamic.Message, error) {
-	md := mtd.GetInputType()
-	var inputs []*dynamic.Message
+func createPayloadsFromJSON(data string, mtd protoreflect.MethodDescriptor) ([]*dynamicpb.Message, error) {
+	md := mtd.Input()
+	var inputs []*dynamicpb.Message
 
 	if len(data) > 0 {
 		if strings.IndexRune(data, '[') == 0 {
 			dataArray := make([]map[string]interface{}, 5)
 			err := json.Unmarshal([]byte(data), &dataArray)
 			if err != nil {
-				return nil, fmt.Errorf("Error unmarshalling payload. Data: '%v' Error: %v", data, err.Error())
+				return nil, fmt.Errorf("error unmarshalling payload. data: '%v' drror: %v", data, err.Error())
 			}
 
 			elems := len(dataArray)
 			if elems > 0 {
-				inputs = make([]*dynamic.Message, elems)
+				inputs = make([]*dynamicpb.Message, elems)
 			}
 
 			for i, elem := range dataArray {
-				elemMsg := dynamic.NewMessage(md)
+				elemMsg := dynamicpb.NewMessage(md)
 				err := messageFromMap(elemMsg, &elem)
 				if err != nil {
-					return nil, fmt.Errorf("Error creating message: %v", err.Error())
+					return nil, fmt.Errorf("error creating message: %v", err.Error())
 				}
 
 				inputs[i] = elemMsg
 			}
 		} else {
-			inputs = make([]*dynamic.Message, 1)
-			inputs[0] = dynamic.NewMessage(md)
+			inputs = make([]*dynamicpb.Message, 1)
+			inputs[0] = dynamicpb.NewMessage(md)
 			err := jsonpb.UnmarshalString(data, inputs[0])
 			if err != nil {
-				return nil, fmt.Errorf("Error creating message from data. Data: '%v' Error: %v", data, err.Error())
+				return nil, fmt.Errorf("error creating message from data. data: '%v' error: %v", data, err.Error())
 			}
 		}
 	}
@@ -331,9 +330,9 @@ func createPayloadsFromJSON(data string, mtd *desc.MethodDescriptor) ([]*dynamic
 	return inputs, nil
 }
 
-func createPayloadsFromBinSingleMessage(binData []byte, mtd *desc.MethodDescriptor) ([]*dynamic.Message, error) {
-	inputs := make([]*dynamic.Message, 0, 1)
-	md := mtd.GetInputType()
+func createPayloadsFromBinSingleMessage(binData []byte, mtd protoreflect.MethodDescriptor) ([]*dynamicpb.Message, error) {
+	inputs := make([]*dynamicpb.Message, 0, 1)
+	md := mtd.Input()
 
 	// return empty array if no data
 	if len(binData) == 0 {
@@ -341,10 +340,10 @@ func createPayloadsFromBinSingleMessage(binData []byte, mtd *desc.MethodDescript
 	}
 
 	// try to unmarshal input as a single message
-	singleMessage := dynamic.NewMessage(md)
+	singleMessage := dynamicpb.NewMessage(md)
 	err := proto.Unmarshal(binData, singleMessage)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating message from binary data: %v", err.Error())
+		return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
 	}
 
 	inputs = append(inputs, singleMessage)
@@ -352,36 +351,43 @@ func createPayloadsFromBinSingleMessage(binData []byte, mtd *desc.MethodDescript
 	return inputs, nil
 }
 
-func createPayloadsFromBinCountDelimited(binData []byte, mtd *desc.MethodDescriptor) ([]*dynamic.Message, error) {
-	inputs := make([]*dynamic.Message, 0)
-	md := mtd.GetInputType()
+func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.MethodDescriptor) ([]*dynamicpb.Message, error) {
+	inputs := make([]*dynamicpb.Message, 0)
+	md := mtd.Input()
 
 	// return empty array if no data
 	if len(binData) == 0 {
 		return inputs, nil
 	}
 
-	// try to unmarshal input as several count-delimited messages
-	buffer := proto.NewBuffer(binData)
-	for {
-		msg := dynamic.NewMessage(md)
-		err := buffer.DecodeMessage(msg)
+	// // try to unmarshal input as several count-delimited messages
+	// buffer := proto.NewBuffer(binData)
+	// for {
+	// 	msg := dynamicpb.NewMessage(md)
+	// 	err := buffer.DecodeMessage(msg)
 
-		if err == io.ErrUnexpectedEOF {
-			break
-		}
+	// 	if err == io.ErrUnexpectedEOF {
+	// 		break
+	// 	}
 
-		if err != nil {
-			return nil, fmt.Errorf("Error creating message from binary data: %v", err.Error())
-		}
+	// 	if err != nil {
+	// 		return nil, fmt.Errorf("Error creating message from binary data: %v", err.Error())
+	// 	}
 
-		inputs = append(inputs, msg)
+	// 	inputs = append(inputs, msg)
+	// }
+
+	message := dynamicpb.NewMessage(md)
+	if err := proto.Unmarshal(binData, message); err != nil {
+		return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
 	}
+
+	inputs = append(inputs, message)
 
 	return inputs, nil
 }
 
-func createPayloadsFromBin(binData []byte, mtd *desc.MethodDescriptor) ([]*dynamic.Message, error) {
+func createPayloadsFromBin(binData []byte, mtd protoreflect.MethodDescriptor) ([]*dynamicpb.Message, error) {
 	inputs, err := createPayloadsFromBinCountDelimited(binData, mtd)
 
 	if err == nil && len(inputs) > 0 {
@@ -392,7 +398,7 @@ func createPayloadsFromBin(binData []byte, mtd *desc.MethodDescriptor) ([]*dynam
 }
 
 type dynamicMessageProvider struct {
-	mtd           *desc.MethodDescriptor
+	mtd           protoreflect.MethodDescriptor
 	data          []byte
 	arrayJSONData []string
 	arrayLen      uint
@@ -402,7 +408,7 @@ type dynamicMessageProvider struct {
 	indexCounter    uint
 }
 
-func newDynamicMessageProvider(mtd *desc.MethodDescriptor, data []byte, streamCallCount uint, withFuncs, withTemplateData bool) (*dynamicMessageProvider, error) {
+func newDynamicMessageProvider(mtd protoreflect.MethodDescriptor, data []byte, streamCallCount uint, withFuncs, withTemplateData bool) (*dynamicMessageProvider, error) {
 	mp := dynamicMessageProvider{
 		mtd:             mtd,
 		data:            data,
@@ -449,7 +455,7 @@ func newDynamicMessageProvider(mtd *desc.MethodDescriptor, data []byte, streamCa
 	return &mp, nil
 }
 
-func (m *dynamicMessageProvider) GetStreamMessage(parentCallData *CallData) (*dynamic.Message, error) {
+func (m *dynamicMessageProvider) GetStreamMessage(parentCallData *CallData) (*dynamicpb.Message, error) {
 	isLast := false
 	if m.streamCallCount > 0 {
 		if m.counter >= m.streamCallCount {
@@ -482,17 +488,17 @@ func (m *dynamicMessageProvider) GetStreamMessage(parentCallData *CallData) (*dy
 		return nil, err
 	}
 
-	md := m.mtd.GetInputType()
-	msg := dynamic.NewMessage(md)
+	md := m.mtd.Input()
+	msg := dynamicpb.NewMessage(md)
 	err = jsonpb.UnmarshalString(string(buf), msg)
 	if err != nil {
-		return nil, fmt.Errorf("Error creating message from data. Data: '%v' Error: %v", data, err.Error())
+		return nil, fmt.Errorf("error creating message from data. data: '%v' error: %v", data, err.Error())
 	}
 
 	m.counter++
 	m.indexCounter++
 
-	if err == nil && isLast {
+	if isLast {
 		err = ErrLastMessage
 	}
 
@@ -500,14 +506,14 @@ func (m *dynamicMessageProvider) GetStreamMessage(parentCallData *CallData) (*dy
 }
 
 type staticMessageProvider struct {
-	inputs          []*dynamic.Message
+	inputs          []*dynamicpb.Message
 	inputLen        uint
 	streamCallCount uint
 	counter         uint
 	indexCounter    uint
 }
 
-func newStaticMessageProvider(streamCallCount uint, inputs []*dynamic.Message) (*staticMessageProvider, error) {
+func newStaticMessageProvider(streamCallCount uint, inputs []*dynamicpb.Message) (*staticMessageProvider, error) {
 	return &staticMessageProvider{
 		streamCallCount: streamCallCount,
 		inputs:          inputs,
@@ -515,7 +521,7 @@ func newStaticMessageProvider(streamCallCount uint, inputs []*dynamic.Message) (
 	}, nil
 }
 
-func (m *staticMessageProvider) GetStreamMessage(parentCallData *CallData) (*dynamic.Message, error) {
+func (m *staticMessageProvider) GetStreamMessage(parentCallData *CallData) (*dynamicpb.Message, error) {
 	isLast := false
 	if m.streamCallCount > 0 {
 		if m.counter >= m.streamCallCount {
@@ -537,7 +543,7 @@ func (m *staticMessageProvider) GetStreamMessage(parentCallData *CallData) (*dyn
 	m.indexCounter++
 
 	var err error
-	if err == nil && isLast {
+	if isLast {
 		err = ErrLastMessage
 	}
 

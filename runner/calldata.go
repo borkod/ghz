@@ -14,7 +14,7 @@ import (
 
 	"github.com/Masterminds/sprig/v3"
 	"github.com/google/uuid"
-	"github.com/jhump/protoreflect/desc"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 const charset = "abcdefghijklmnopqrstuvwxyz" +
@@ -56,7 +56,7 @@ var tmplFuncMap = template.FuncMap{
 
 // newCallData returns new CallData
 func newCallData(
-	mtd *desc.MethodDescriptor,
+	mtd protoreflect.MethodDescriptor,
 	workerID string, reqNum int64, withFuncs, withTemplateData bool, funcs template.FuncMap) *CallData {
 
 	var t *template.Template
@@ -86,13 +86,13 @@ func newCallData(
 	return &CallData{
 		WorkerID:           workerID,
 		RequestNumber:      reqNum,
-		FullyQualifiedName: mtd.GetFullyQualifiedName(),
-		MethodName:         mtd.GetName(),
-		ServiceName:        mtd.GetService().GetName(),
-		InputName:          mtd.GetInputType().GetName(),
-		OutputName:         mtd.GetOutputType().GetName(),
-		IsClientStreaming:  mtd.IsClientStreaming(),
-		IsServerStreaming:  mtd.IsServerStreaming(),
+		FullyQualifiedName: string(mtd.FullName()),
+		MethodName:         string(mtd.Name()),
+		ServiceName:        string(mtd.Parent().Name()),
+		InputName:          string(mtd.Input().Name()),
+		OutputName:         string(mtd.Output().Name()),
+		IsClientStreaming:  mtd.IsStreamingClient(),
+		IsServerStreaming:  mtd.IsStreamingServer(),
 		Timestamp:          now.Format(time.RFC3339),
 		TimestampUnix:      now.Unix(),
 		TimestampUnixMilli: now.UnixNano() / 1000000,

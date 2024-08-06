@@ -6,7 +6,7 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/bojand/ghz/protodesc"
+	protodesc "github.com/bojand/ghz/protodescv2"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )

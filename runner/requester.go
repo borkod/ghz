@@ -2,18 +2,25 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/http"
+	"os"
 	"strconv"
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
+	"connectrpc.com/grpcreflect"
 	"github.com/bojand/ghz/load"
-	"github.com/bojand/ghz/protodesc"
-	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
-	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
-	"github.com/jhump/protoreflect/grpcreflect"
+	protodesc "github.com/bojand/ghz/protodescv2"
+	"golang.org/x/net/http2"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"go.uber.org/multierr"
 	"google.golang.org/grpc"
@@ -29,6 +36,8 @@ import (
 // Max size of the buffer of result channel.
 const maxResult = 1000000
 
+type Channel = grpc.ClientConnInterface
+
 // result of a call
 type callResult struct {
 	err       error
@@ -40,10 +49,10 @@ type callResult struct {
 // Requester is used for doing the requests
 type Requester struct {
 	conns    []*grpc.ClientConn
-	stubs    []grpcdynamic.Stub
+	stubs    []Channel
 	handlers []*statsHandler
 
-	mtd      *desc.MethodDescriptor
+	mtd      protoreflect.MethodDescriptor
 	reporter *Reporter
 
 	config *RunConfig
@@ -64,7 +73,7 @@ type Requester struct {
 func NewRequester(c *RunConfig) (*Requester, error) {
 
 	var err error
-	var mtd *desc.MethodDescriptor
+	var mtd protoreflect.MethodDescriptor
 
 	reqr := &Requester{
 		config:     c,
@@ -73,7 +82,7 @@ func NewRequester(c *RunConfig) (*Requester, error) {
 		stopCh:     make(chan bool, 1),
 		workers:    make([]*Worker, 0, c.c),
 		conns:      make([]*grpc.ClientConn, 0, c.nConns),
-		stubs:      make([]grpcdynamic.Stub, 0, c.nConns),
+		stubs:      make([]Channel, 0, c.nConns),
 	}
 
 	if c.proto != "" {
@@ -108,19 +117,40 @@ func NewRequester(c *RunConfig) (*Requester, error) {
 
 		refCtx := metadata.NewOutgoingContext(ctx, md)
 
-		refClient := grpcreflect.NewClientAuto(refCtx, cc)
+		var httpclient *http.Client
+		if reqr.config.insecure {
+			httpclient = newInsecureClient(reqr.config)
+		} else {
+			var tlsConf tls.Config
+			configureTLS(&tlsConf, reqr.config.skipVerify, reqr.config.cacert, reqr.config.cert, reqr.config.key, reqr.config.cname)
+			t := &http.Transport{
+				TLSClientConfig: &tlsConf,
+				IdleConnTimeout: reqr.config.dialTimeout, // TODO: Which timeout is correct here?
+			}
+			httpclient = &http.Client{Transport: t, Timeout: reqr.config.dialTimeout} // TODO: Which timeout is correct here?
+		}
 
-		mtd, err = protodesc.GetMethodDescFromReflect(c.call, refClient)
+		// TODO: Message Size ? + StatsHandler ?
+		refClient := grpcreflect.NewClient(httpclient, reqr.config.host, connect.WithGRPC())
+		var streamOptions = []grpcreflect.ClientStreamOption{}
+		streamOptions = append(streamOptions, grpcreflect.WithReflectionHost(reqr.config.host))
+		if reqr.config.authority != "" {
+			streamOptions = append(streamOptions, grpcreflect.WithRequestHeaders(http.Header{":authority": {reqr.config.authority}}))
+		}
+		stream := refClient.NewStream(refCtx, streamOptions...)
+		defer stream.Close()
+
+		mtd, err = protodesc.GetMethodDescFromReflect(c.call, stream)
 	}
 
 	if err != nil {
 		return nil, err
 	}
 
-	md := mtd.GetInputType()
-	payloadMessage := dynamic.NewMessage(md)
+	md := mtd.Input()
+	payloadMessage := dynamicpb.NewMessage(md)
 	if payloadMessage == nil {
-		return nil, fmt.Errorf("no input type of method: %s", mtd.GetName())
+		return nil, fmt.Errorf("no input type of method: %s", mtd.Name())
 	}
 
 	// fill in the rest
@@ -167,7 +197,7 @@ func (b *Requester) Run() (*Report, error) {
 
 	// create a client stub for each connection
 	for n := 0; n < b.config.nConns; n++ {
-		stub := grpcdynamic.NewStub(cc[n])
+		stub := cc[n]
 		b.stubs = append(b.stubs, stub)
 	}
 
@@ -285,6 +315,57 @@ func (b *Requester) closeClientConns() {
 	}
 
 	b.conns = nil
+}
+
+func newInsecureClient(c *RunConfig) *http.Client {
+	return &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true,
+			DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
+				// If you're also using this client for non-h2c traffic, you may want
+				// to delegate to tls.Dial if the network isn't TCP or the addr isn't
+				// in an allowlist.
+				return net.Dial(network, addr)
+			},
+			IdleConnTimeout: c.keepaliveTime, // TODO: Which timeout is correct here?
+		},
+	}
+}
+
+func configureTLS(tlsConf *tls.Config, skipVerify bool, cacertFile, clientCertFile, clientKeyFile, cname string) error {
+
+	if clientCertFile != "" {
+		// Load the client certificates from disk
+		certificate, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
+		if err != nil {
+			return fmt.Errorf("could not load client key pair: %v", err)
+		}
+		tlsConf.Certificates = []tls.Certificate{certificate}
+	}
+
+	if skipVerify {
+		tlsConf.InsecureSkipVerify = true
+	} else if cacertFile != "" {
+		// Create a certificate pool from the certificate authority
+		certPool := x509.NewCertPool()
+		ca, err := os.ReadFile(cacertFile)
+		if err != nil {
+			return fmt.Errorf("could not read ca certificate: %v", err)
+		}
+
+		// Append the certificates from the CA
+		if ok := certPool.AppendCertsFromPEM(ca); !ok {
+			return errors.New("failed to append ca certs")
+		}
+
+		tlsConf.RootCAs = certPool
+	}
+
+	if cname != "" {
+		tlsConf.ServerName = cname
+	}
+
+	return nil
 }
 
 func (b *Requester) newClientConn(withStatsHandler bool) (*grpc.ClientConn, error) {
