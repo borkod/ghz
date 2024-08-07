@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"text/template"
@@ -363,7 +364,7 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 	// // try to unmarshal input as several count-delimited messages
 	// buffer := proto.NewBuffer(binData)
 	// for {
-	// 	msg := dynamicpb.NewMessage(md)
+	// 	msg := dynamic.NewMessage(md)
 	// 	err := buffer.DecodeMessage(msg)
 
 	// 	if err == io.ErrUnexpectedEOF {
@@ -377,12 +378,24 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 	// 	inputs = append(inputs, msg)
 	// }
 
-	message := dynamicpb.NewMessage(md)
-	if err := proto.Unmarshal(binData, message); err != nil {
-		return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
-	}
+	//var inputs []proto.Message
+	offset := 0
 
-	inputs = append(inputs, message)
+	fmt.Println("HERE")
+
+	for offset < len(binData) {
+		msg := dynamicpb.NewMessage(md)
+		err := proto.UnmarshalOptions{}.Unmarshal(binData[offset:], msg)
+		if err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
+		}
+
+		inputs = append(inputs, msg)
+		offset += len(msg.ProtoReflect().Descriptor().FullName()) // Adjust this line as needed to move the offset correctly
+	}
 
 	return inputs, nil
 }
