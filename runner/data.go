@@ -381,8 +381,6 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 	//var inputs []proto.Message
 	offset := 0
 
-	fmt.Println("HERE")
-
 	for offset < len(binData) {
 		msg := dynamicpb.NewMessage(md)
 		err := proto.UnmarshalOptions{}.Unmarshal(binData[offset:], msg)

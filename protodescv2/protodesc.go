@@ -1,6 +1,7 @@
 package protodescv2
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,8 +9,7 @@ import (
 	"strings"
 
 	"connectrpc.com/grpcreflect"
-	"github.com/bufbuild/protocompile/parser"
-	"github.com/bufbuild/protocompile/reporter"
+	"github.com/bufbuild/protocompile"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -25,48 +25,57 @@ var errNoMethodNameSpecified = errors.New("no method name specified")
 // GetMethodDescFromProto gets method descriptor for the given call symbol from proto file given my path proto
 // imports is used for import paths in parsing the proto file
 func GetMethodDescFromProto(call, proto string, imports []string) (protoreflect.MethodDescriptor, error) {
-	er := func(err reporter.ErrorWithPos) error {
-		return err.Unwrap()
-	}
 
 	filename := proto
 	if filepath.IsAbs(filename) {
 		filename = filepath.Base(proto)
 	}
 
-	f, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	rep := reporter.NewReporter(er, nil)
-
-	ast, err := parser.Parse(filename, f, reporter.NewHandler(rep))
-	if err != nil {
-		return nil, err
+	// TODO: Should we use protocompile.WithStandardImports resolver? or wellknownimports.WithStandardImports?
+	// https://pkg.go.dev/github.com/bufbuild/protocompile#WithStandardImports
+	// https://pkg.go.dev/github.com/bufbuild/protocompile/wellknownimports#WithStandardImports
+	compiler := protocompile.Compiler{
+		Resolver: protocompile.WithStandardImports(&protocompile.SourceResolver{
+			ImportPaths: imports,
+		}),
 	}
 
-	res, err := parser.ResultFromAST(ast, true, reporter.NewHandler(rep))
+	files, err := compiler.Compile(context.Background(), filename)
 	if err != nil {
 		return nil, err
 	}
 
-	file := res.FileDescriptorProto()
-	// files := map[string]*descriptorpb.FileDescriptorProto{}
-	// files[file.GetName()] = file
-
-	var registry protoregistry.Files
-
-	fileDescriptor, err := protodesc.NewFile(file, &registry)
+	pkg, svc, mth, err := parsePkgServiceMethod(call)
 	if err != nil {
-		return nil, fmt.Errorf("failed to process %q: %v", file.GetName(), err)
-	}
-	if err := registry.RegisterFile(fileDescriptor); err != nil {
-		return nil, fmt.Errorf("failed to register %q: %v", file.GetName(), err)
+		return nil, err
 	}
 
-	return getMethodDesc(call, registry)
+	fqn := protoreflect.FullName(pkg + "." + svc + "." + mth)
+
+	fd := files[0].FindDescriptorByName(fqn)
+
+	methodDescriptor, ok := fd.(protoreflect.MethodDescriptor)
+	if !ok {
+		return nil, fmt.Errorf("element name %q is not a method: %v", fqn, err)
+	}
+
+	return methodDescriptor, nil
+
+	// file := res.FileDescriptorProto()
+	// // files := map[string]*descriptorpb.FileDescriptorProto{}
+	// // files[file.GetName()] = file
+
+	// var registry protoregistry.Files
+
+	// fileDescriptor, err := protodesc.NewFile(file, &registry)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to process %q: %v", file.GetName(), err)
+	// }
+	// if err := registry.RegisterFile(fileDescriptor); err != nil {
+	// 	return nil, fmt.Errorf("failed to register %q: %v", file.GetName(), err)
+	// }
+
+	// return getMethodDesc(call, registry)
 }
 
 // GetMethodDescFromProtoSet gets method descriptor for the given call symbol from protoset file given my path protoset
