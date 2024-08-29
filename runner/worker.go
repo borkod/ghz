@@ -2,17 +2,19 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"time"
 
+	"github.com/jhump/protoreflect/dynamic"
+	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"go.uber.org/multierr"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
@@ -23,19 +25,9 @@ type TickValue struct {
 	reqNumber uint64
 }
 
-// BidiStream represents a bi-directional stream for sending messages to and receiving
-// messages from a server. The header and trailer metadata sent by the server can also be
-// queried.
-type BidiStream struct {
-	stream   grpc.ClientStream
-	reqType  protoreflect.MessageDescriptor
-	respType protoreflect.MessageDescriptor
-	//mf       *dynamic.MessageFactory
-}
-
 // Worker is used for doing a single stream of requests in parallel
 type Worker struct {
-	stub Channel
+	stub grpcdynamic.Stub
 	mtd  protoreflect.MethodDescriptor
 
 	config   *RunConfig
@@ -224,12 +216,12 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
 	}
 
-	res := dynamicpb.NewMessage(w.mtd.Output())
-	resErr := w.stub.Invoke(*ctx, requestMethod(w.mtd), input, res, callOptions...)
+	resp := dynamicpb.NewMessage(respType)
+	res, resErr = w.stub.InvokeRpc(*ctx, w.mtd, input, callOptions...)
 
 	if w.config.hasLog {
-		inputData, _ := protojson.Marshal(input)
-		resData, _ := protojson.Marshal(res)
+		inputData, _ := input.MarshalJSON()
+		resData, _ := json.Marshal(res)
 
 		w.config.log.Debugw("Received response", "workerID", w.workerID, "call type", "unary",
 			"call", w.mtd.FullName(),
@@ -242,72 +234,30 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 
 func (w *Worker) makeClientStreamingRequest(ctx *context.Context,
 	ctd *CallData, messageProvider StreamMessageProviderFunc) error {
-	var str grpc.ClientStream
-	var err error
+	var str *grpcdynamic.ClientStream
 	var callOptions = []grpc.CallOption{}
 	if w.config.enableCompression {
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
 	}
-
-	if !w.mtd.IsStreamingClient() || w.mtd.IsStreamingServer() {
-		// TODO: perform w.config.log.debugw
-		return fmt.Errorf("InvokeRpcClientStream is for client-streaming methods; %q is %s", w.mtd.FullName(), methodType(w.mtd))
-	}
-	ctxCancel, callCancel := context.WithCancel(*ctx)
-	sd := grpc.StreamDesc{
-		StreamName:    string(w.mtd.FullName()),
-		ServerStreams: w.mtd.IsStreamingServer(),
-		ClientStreams: w.mtd.IsStreamingClient(),
-	}
-	if str, err = w.stub.NewStream(ctxCancel, &sd, requestMethod(w.mtd), callOptions...); err != nil {
-		callCancel()
+	str, err := w.stub.InvokeRpcClientStream(*ctx, w.mtd, callOptions...)
+	if err != nil {
 		if w.config.hasLog {
 			w.config.log.Errorw("Invoke Client Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
 				"call type", "client-streaming",
 				"call", w.mtd.FullName(), "error", err)
 		}
 		return err
-	} else {
-		go func() {
-			// when the new stream is finished, also cleanup the parent context
-			<-str.Context().Done()
-			callCancel()
-		}()
 	}
 
 	// TODO: should this return error? right now we just log errors?
 	closeStream := func() {
-		if closeErr := str.CloseSend(); err != nil {
-			w.config.log.Debugw("Close send", "workerID", w.workerID, "call type", "client-streaming",
+		res, closeErr := str.CloseAndReceive()
+
+		if w.config.hasLog {
+			w.config.log.Debugw("Close and receive", "workerID", w.workerID, "call type", "client-streaming",
 				"call", w.mtd.FullName(),
-				"error", closeErr)
+				"response", res, "error", closeErr)
 		}
-		resp := dynamicpb.NewMessage(w.mtd.Output())
-		if err := str.RecvMsg(resp); err != nil {
-			if w.config.hasLog {
-				w.config.log.Debugw("Close and receive", "workerID", w.workerID, "call type", "client-streaming",
-					"call", w.mtd.FullName(),
-					"response", resp, "error", err)
-			}
-		}
-		if err := str.RecvMsg(resp); err != io.EOF {
-			if err == nil {
-				callCancel()
-				// TODO: do proper debug log
-				w.config.log.Debugw("client-streaming method %q returned more than one response message", w.mtd.FullName())
-			} else {
-				// TODO: do proper debug log
-				w.config.log.Debugw("client-streaming method %q returned more than one response message", w.mtd.FullName())
-			}
-		}
-
-		//res, closeErr := str.CloseAndReceive()
-
-		// if w.config.hasLog {
-		// 	w.config.log.Debugw("Close and receive", "workerID", w.workerID, "call type", "client-streaming",
-		// 		"call", w.mtd.FullName(),
-		// 		"response", res, "error", closeErr)
-		// }
 	}
 
 	performSend := func(payload *dynamicpb.Message) (bool, error) {
@@ -421,8 +371,6 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 		return err
 	}
 
-	var str grpc.ClientStream
-	var err error
 	var callOptions = []grpc.CallOption{}
 	if w.config.enableCompression {
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
@@ -431,61 +379,18 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 	callCtx, callCancel := context.WithCancel(*ctx)
 	defer callCancel()
 
-	respType := w.mtd.Output()
-	sd := grpc.StreamDesc{
-		StreamName:    string(w.mtd.Name()),
-		ServerStreams: w.mtd.IsStreamingServer(),
-		ClientStreams: w.mtd.IsStreamingClient(),
-	}
-	if str, err = w.stub.NewStream(callCtx, &sd, requestMethod(w.mtd), callOptions...); err != nil {
-		callCancel()
+	str, err := w.stub.InvokeRpcServerStream(callCtx, w.mtd, input, callOptions...)
+
+	if err != nil {
 		if w.config.hasLog {
 			w.config.log.Errorw("Invoke Server Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
 				"call type", "server-streaming",
 				"call", w.mtd.FullName(),
 				"input", input, "error", err)
 		}
+
 		return err
-	} else {
-		err = str.SendMsg(input)
-		if err != nil {
-			callCancel()
-			if w.config.hasLog {
-				w.config.log.Errorw("Invoke Server Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
-					"call type", "server-streaming",
-					"call", w.mtd.FullName(),
-					"input", input, "error", err)
-			}
-			return err
-		}
-		err = str.CloseSend()
-		if err != nil {
-			callCancel()
-			if w.config.hasLog {
-				w.config.log.Errorw("Invoke Server Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
-					"call type", "server-streaming",
-					"call", w.mtd.FullName(),
-					"input", input, "error", err)
-			}
-			return err
-		}
-		go func() {
-			// when the new stream is finished, also cleanup the parent context
-			<-str.Context().Done()
-			callCancel()
-		}()
 	}
-
-	// if err != nil {
-	// 	if w.config.hasLog {
-	// 		w.config.log.Errorw("Invoke Server Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
-	// 			"call type", "server-streaming",
-	// 			"call", w.mtd.FullName(),
-	// 			"input", input, "error", err)
-	// 	}
-
-	// 	return err
-	// }
 
 	doneCh := make(chan struct{})
 	cancel := make(chan struct{}, 1)
@@ -516,39 +421,38 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 		}
 
 		resp := dynamicpb.NewMessage(respType)
-		if err := str.RecvMsg(resp); err != nil {
-			if w.config.hasLog {
-				w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "server-streaming",
-					"call", w.mtd.FullName(),
-					"response", resp, "error", err)
-			}
+		res, err = str.RecvMsg()
+		if w.config.hasLog {
+			w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "server-streaming",
+				"call", w.mtd.FullName(),
+				"response", resp, "error", err)
 		}
 
 		// with any of the cancellation operations we can't just bail
 		// we have to drain the messages until the server gets the cancel and ends their side of the stream
 
 		if w.streamRecv != nil {
-			//if converted, ok := res.(*dynamicpb.Message); ok {
-			err = w.streamRecv(resp, err)
-			if errors.Is(err, ErrEndStream) && !interceptCanceled {
-				interceptCanceled = true
-				err = nil
+			if converted, ok := res.(*dynamicpb.Message); ok {
+				err = w.streamRecv(converted, err)
+				if errors.Is(err, ErrEndStream) && !interceptCanceled {
+					interceptCanceled = true
+					err = nil
 
-				callCancel()
+					callCancel()
+				}
 			}
-			//}
 		}
 
 		if streamInterceptor != nil {
-			//if converted, ok := res.(*dynamicpb.Message); ok {
-			err = streamInterceptor.Recv(resp, err)
-			if errors.Is(err, ErrEndStream) && !interceptCanceled {
-				interceptCanceled = true
-				err = nil
+			if converted, ok := res.(*dynamicpb.Message); ok {
+				err = streamInterceptor.Recv(converted, err)
+				if errors.Is(err, ErrEndStream) && !interceptCanceled {
+					interceptCanceled = true
+					err = nil
 
-				callCancel()
+					callCancel()
+				}
 			}
-			//}
 		}
 
 		if err != nil {
@@ -586,9 +490,6 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
 	}
 
-	var err error
-	var str *BidiStream
-	//str, err := w.stub.InvokeRpcBidiStream(*ctx, w.mtd, callOptions...)
 	if !w.mtd.IsStreamingClient() || !w.mtd.IsStreamingServer() {
 		if w.config.hasLog {
 			w.config.log.Errorw("makeBidiRequest is for bidi-streaming methods; %q is %s", w.mtd.FullName(), methodType(w.mtd),
@@ -597,31 +498,17 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 		}
 		return fmt.Errorf("makeBidiRequest is for bidi-streaming methods; %q is %s", w.mtd.FullName(), methodType(w.mtd))
 	}
-	sd := grpc.StreamDesc{
-		StreamName:    string(w.mtd.Name()),
-		ServerStreams: w.mtd.IsStreamingServer(),
-		ClientStreams: w.mtd.IsStreamingClient(),
-	}
-	if cs, err := w.stub.NewStream(*ctx, &sd, requestMethod(w.mtd), callOptions...); err != nil {
+	str, err := w.stub.InvokeRpcBidiStream(*ctx, w.mtd, callOptions...)
+
+	if err != nil {
 		if w.config.hasLog {
 			w.config.log.Errorw("Invoke Bidi RPC call error: "+err.Error(),
 				"workerID", w.workerID, "call type", "bidi",
 				"call", w.mtd.FullName(), "error", err)
 		}
+
 		return err
-	} else {
-		str = &BidiStream{cs, w.mtd.Input(), w.mtd.Output()}
 	}
-
-	// if err != nil {
-	// 	if w.config.hasLog {
-	// 		w.config.log.Errorw("Invoke Bidi RPC call error: "+err.Error(),
-	// 			"workerID", w.workerID, "call type", "bidi",
-	// 			"call", w.mtd.GetFullyQualifiedName(), "error", err)
-	// 	}
-
-	// 	return err
-	// }
 
 	counter := uint(0)
 	indexCounter := 0
@@ -629,7 +516,7 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 	sendDone := make(chan bool)
 
 	closeStream := func() {
-		closeErr := str.stream.CloseSend()
+		closeErr := str.CloseSend()
 
 		// TODO: Should this check for error first?
 		if w.config.hasLog {
@@ -663,39 +550,39 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 		interceptCanceled := false
 
 		for recvErr == nil {
-			resp := dynamicpb.NewMessage(str.respType)
-			if recvErr = str.stream.RecvMsg(resp); recvErr != nil {
-				if w.config.hasLog {
-					w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "bidi",
-						"call", w.mtd.FullName(),
-						"response", resp, "error", recvErr)
-				}
+			//var res proto.Message
+			resp := dynamicpb.NewMessage(respType)
+			res, recvErr = str.RecvMsg()
+			if w.config.hasLog {
+				w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "bidi",
+					"call", w.mtd.FullName(),
+					"response", res, "error", recvErr)
 			}
 
 			if w.streamRecv != nil {
-				//if converted, ok := res.(*dynamic.Message); ok {
-				iErr := w.streamRecv(resp, recvErr)
-				if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
-					interceptCanceled = true
-					if len(cancel) == 0 {
-						cancel <- struct{}{}
+				if converted, ok := res.(*dynamic.Message); ok {
+					iErr := w.streamRecv(converted, recvErr)
+					if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
+						interceptCanceled = true
+						if len(cancel) == 0 {
+							cancel <- struct{}{}
+						}
+						recvErr = nil
 					}
-					recvErr = nil
 				}
-				//}
 			}
 
 			if streamInterceptor != nil {
-				//if converted, ok := res.(*dynamic.Message); ok {
-				iErr := streamInterceptor.Recv(resp, recvErr)
-				if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
-					interceptCanceled = true
-					if len(cancel) == 0 {
-						cancel <- struct{}{}
+				if converted, ok := res.(*dynamic.Message); ok {
+					iErr := streamInterceptor.Recv(converted, recvErr)
+					if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
+						interceptCanceled = true
+						if len(cancel) == 0 {
+							cancel <- struct{}{}
+						}
+						recvErr = nil
 					}
-					recvErr = nil
 				}
-				//}
 			}
 
 			if recvErr != nil {
@@ -739,18 +626,7 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 				break
 			}
 
-			err := checkMessageType(str.reqType, payload)
-
-			if err != nil {
-				if err == io.EOF {
-					err = nil
-				}
-
-				break
-			}
-
-			str.stream.SendMsg(payload)
-
+			err = str.SendMsg(payload)
 			if err != nil {
 				if err == io.EOF {
 					err = nil

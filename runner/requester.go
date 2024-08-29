@@ -18,6 +18,7 @@ import (
 	"connectrpc.com/grpcreflect"
 	"github.com/bojand/ghz/load"
 	protodesc "github.com/bojand/ghz/protodescv2"
+	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"golang.org/x/net/http2"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -49,7 +50,7 @@ type callResult struct {
 // Requester is used for doing the requests
 type Requester struct {
 	conns    []*grpc.ClientConn
-	stubs    []Channel
+	stubs    []grpcdynamic.Stub
 	handlers []*statsHandler
 
 	mtd      protoreflect.MethodDescriptor
@@ -82,7 +83,7 @@ func NewRequester(c *RunConfig) (*Requester, error) {
 		stopCh:     make(chan bool, 1),
 		workers:    make([]*Worker, 0, c.c),
 		conns:      make([]*grpc.ClientConn, 0, c.nConns),
-		stubs:      make([]Channel, 0, c.nConns),
+		stubs:      make([]grpcdynamic.Stub, 0, c.nConns),
 	}
 
 	if c.proto != "" {
@@ -197,7 +198,7 @@ func (b *Requester) Run() (*Report, error) {
 
 	// create a client stub for each connection
 	for n := 0; n < b.config.nConns; n++ {
-		stub := cc[n]
+		stub := grpcdynamic.NewStub(cc[n])
 		b.stubs = append(b.stubs, stub)
 	}
 
