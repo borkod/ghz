@@ -3,6 +3,7 @@ module github.com/bojand/ghz
 go 1.18
 
 require (
+	connectrpc.com/connect v1.11.0
 	connectrpc.com/grpcreflect v1.2.0
 	github.com/Masterminds/sprig/v3 v3.2.3
 	github.com/alecthomas/kingpin v1.3.8-0.20191105203113-8c96d1c22481
@@ -39,7 +40,6 @@ require (
 	4d63.com/gochecknoglobals v0.1.0 // indirect
 	cloud.google.com/go/compute v1.20.1 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
-	connectrpc.com/connect v1.11.0 // indirect
 	github.com/Antonboom/errname v0.1.6 // indirect
 	github.com/Antonboom/nilnil v0.1.1 // indirect
 	github.com/BurntSushi/toml v1.1.0 // indirect

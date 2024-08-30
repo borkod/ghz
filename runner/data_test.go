@@ -220,7 +220,8 @@ func TestData_createPayloads(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, inputs)
 		assert.Len(t, inputs, 1)
-		assert.EqualValues(t, "foo", inputs[0].Descriptor().Fields().ByName("value"))
+		fd := inputs[0].Descriptor().Fields().ByName("value")
+		assert.EqualValues(t, "foo", inputs[0].Get(fd).String())
 	})
 
 	t.Run("create slice from single message binary data", func(t *testing.T) {
@@ -235,7 +236,8 @@ func TestData_createPayloads(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, inputs)
 		assert.Len(t, inputs, 1)
-		assert.EqualValues(t, msg1.GetName(), inputs[0].Descriptor().Fields().ByName("name"))
+		fd := inputs[0].Descriptor().Fields().ByName("name")
+		assert.EqualValues(t, msg1.GetName(), inputs[0].Get(fd).String())
 	})
 
 	t.Run("create slice from count-delimited binary data", func(t *testing.T) {
@@ -253,8 +255,10 @@ func TestData_createPayloads(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, inputs)
 		assert.Len(t, inputs, 2)
-		assert.EqualValues(t, msg1.GetName(), inputs[0].Descriptor().Fields().ByName("name"))
-		assert.EqualValues(t, msg2.GetName(), inputs[1].Descriptor().Fields().ByName("name"))
+		fd := inputs[0].Descriptor().Fields().ByName("name")
+		assert.EqualValues(t, msg1.GetName(), inputs[0].Get(fd).String())
+		fd = inputs[1].Descriptor().Fields().ByName("name")
+		assert.EqualValues(t, msg2.GetName(), inputs[1].Get(fd).String())
 	})
 
 	t.Run("on empty binary data returns empty slice", func(t *testing.T) {

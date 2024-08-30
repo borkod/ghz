@@ -8,13 +8,16 @@ import (
 	"io"
 	"time"
 
-	"github.com/jhump/protoreflect/dynamic"
+	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic/grpcdynamic"
 	"go.uber.org/multierr"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding/gzip"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/protoadapt"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
@@ -216,11 +219,19 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
 	}
 
-	resp := dynamicpb.NewMessage(respType)
-	res, resErr = w.stub.InvokeRpc(*ctx, w.mtd, input, callOptions...)
+	fd, err := desc.CreateFileDescriptor(protodesc.ToFileDescriptorProto(w.mtd.ParentFile()))
+	if err != nil {
+		// TODO: perform w.config.log.debugw
+		return err
+	}
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+	resv1, resErr := w.stub.InvokeRpc(*ctx, mtd, input, callOptions...)
+	res := protoadapt.MessageV2Of(resv1)
 
 	if w.config.hasLog {
-		inputData, _ := input.MarshalJSON()
+		// TODO: Make sure no errors here
+		inputData, _ := proto.Marshal(input)
+		//inputData, _ := input.MarshalJSON()
 		resData, _ := json.Marshal(res)
 
 		w.config.log.Debugw("Received response", "workerID", w.workerID, "call type", "unary",
@@ -239,7 +250,15 @@ func (w *Worker) makeClientStreamingRequest(ctx *context.Context,
 	if w.config.enableCompression {
 		callOptions = append(callOptions, grpc.UseCompressor(gzip.Name))
 	}
-	str, err := w.stub.InvokeRpcClientStream(*ctx, w.mtd, callOptions...)
+
+	fd, err := desc.CreateFileDescriptor(protodesc.ToFileDescriptorProto(w.mtd.ParentFile()))
+	if err != nil {
+		// TODO: perform w.config.log.debugw
+		return err
+	}
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+
+	str, err = w.stub.InvokeRpcClientStream(*ctx, mtd, callOptions...)
 	if err != nil {
 		if w.config.hasLog {
 			w.config.log.Errorw("Invoke Client Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
@@ -379,7 +398,14 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 	callCtx, callCancel := context.WithCancel(*ctx)
 	defer callCancel()
 
-	str, err := w.stub.InvokeRpcServerStream(callCtx, w.mtd, input, callOptions...)
+	fd, err := desc.CreateFileDescriptor(protodesc.ToFileDescriptorProto(w.mtd.ParentFile()))
+	if err != nil {
+		// TODO: perform w.config.log.debugw
+		return err
+	}
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+
+	str, err := w.stub.InvokeRpcServerStream(callCtx, mtd, input, callOptions...)
 
 	if err != nil {
 		if w.config.hasLog {
@@ -420,12 +446,12 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 			break
 		}
 
-		resp := dynamicpb.NewMessage(respType)
-		res, err = str.RecvMsg()
+		//resp := dynamicpb.NewMessage(respType)
+		res, err := str.RecvMsg()
 		if w.config.hasLog {
 			w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "server-streaming",
 				"call", w.mtd.FullName(),
-				"response", resp, "error", err)
+				"response", res, "error", err)
 		}
 
 		// with any of the cancellation operations we can't just bail
@@ -498,7 +524,15 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 		}
 		return fmt.Errorf("makeBidiRequest is for bidi-streaming methods; %q is %s", w.mtd.FullName(), methodType(w.mtd))
 	}
-	str, err := w.stub.InvokeRpcBidiStream(*ctx, w.mtd, callOptions...)
+
+	fd, err := desc.CreateFileDescriptor(protodesc.ToFileDescriptorProto(w.mtd.ParentFile()))
+	if err != nil {
+		// TODO: perform w.config.log.debugw
+		return err
+	}
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+
+	str, err := w.stub.InvokeRpcBidiStream(*ctx, mtd, callOptions...)
 
 	if err != nil {
 		if w.config.hasLog {
@@ -551,38 +585,41 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 
 		for recvErr == nil {
 			//var res proto.Message
-			resp := dynamicpb.NewMessage(respType)
-			res, recvErr = str.RecvMsg()
+			//resp := dynamicpb.NewMessage(respType)
+			resv1, recvErr := str.RecvMsg()
 			if w.config.hasLog {
 				w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "bidi",
 					"call", w.mtd.FullName(),
-					"response", res, "error", recvErr)
+					"response", resv1, "error", recvErr)
 			}
 
 			if w.streamRecv != nil {
-				if converted, ok := res.(*dynamic.Message); ok {
-					iErr := w.streamRecv(converted, recvErr)
-					if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
-						interceptCanceled = true
-						if len(cancel) == 0 {
-							cancel <- struct{}{}
-						}
-						recvErr = nil
+				//if converted, ok := res.(*dynamic.Message); ok {
+				res := dynamicpb.NewMessage(protoadapt.MessageV2Of(resv1).ProtoReflect().Descriptor())
+				iErr := w.streamRecv(res, recvErr)
+				if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
+					interceptCanceled = true
+					if len(cancel) == 0 {
+						cancel <- struct{}{}
 					}
+					recvErr = nil
 				}
+				//}
 			}
 
 			if streamInterceptor != nil {
-				if converted, ok := res.(*dynamic.Message); ok {
-					iErr := streamInterceptor.Recv(converted, recvErr)
-					if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
-						interceptCanceled = true
-						if len(cancel) == 0 {
-							cancel <- struct{}{}
-						}
-						recvErr = nil
+				//if converted, ok := res.(*dynamic.Message); ok {
+				res := dynamicpb.NewMessage(protoadapt.MessageV2Of(resv1).ProtoReflect().Descriptor())
+
+				iErr := streamInterceptor.Recv(res, recvErr)
+				if errors.Is(iErr, ErrEndStream) && !interceptCanceled {
+					interceptCanceled = true
+					if len(cancel) == 0 {
+						cancel <- struct{}{}
 					}
+					recvErr = nil
 				}
+				//}
 			}
 
 			if recvErr != nil {

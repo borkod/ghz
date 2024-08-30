@@ -11,6 +11,7 @@ import (
 
 	"github.com/golang/protobuf/jsonpb"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -284,7 +285,7 @@ func messageFromMap(input *dynamicpb.Message, data *map[string]interface{}) erro
 		return err
 	}
 
-	err = proto.Unmarshal(strData, input)
+	err = protojson.Unmarshal(strData, input)
 	if err != nil {
 		return err
 	}
@@ -342,7 +343,7 @@ func createPayloadsFromBinSingleMessage(binData []byte, mtd protoreflect.MethodD
 
 	// try to unmarshal input as a single message
 	singleMessage := dynamicpb.NewMessage(md)
-	err := proto.Unmarshal(binData, singleMessage)
+	err := protojson.Unmarshal(binData, singleMessage)
 	if err != nil {
 		return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
 	}
@@ -380,7 +381,8 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 
 	//var inputs []proto.Message
 	offset := 0
-
+	fmt.Println("binData", binData)
+	fmt.Println(len(binData))
 	for offset < len(binData) {
 		msg := dynamicpb.NewMessage(md)
 		err := proto.UnmarshalOptions{}.Unmarshal(binData[offset:], msg)
@@ -392,7 +394,7 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 		}
 
 		inputs = append(inputs, msg)
-		offset += len(msg.ProtoReflect().Descriptor().FullName()) // Adjust this line as needed to move the offset correctly
+		offset += proto.MarshalOptions{}.Size(msg) // Adjust this line as needed to move the offset correctly
 	}
 
 	return inputs, nil
