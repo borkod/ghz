@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/golang/protobuf/jsonpb"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protodelim"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -343,7 +346,7 @@ func createPayloadsFromBinSingleMessage(binData []byte, mtd protoreflect.MethodD
 
 	// try to unmarshal input as a single message
 	singleMessage := dynamicpb.NewMessage(md)
-	err := protojson.Unmarshal(binData, singleMessage)
+	err := proto.Unmarshal(binData, singleMessage)
 	if err != nil {
 		return nil, fmt.Errorf("error creating message from binary data: %v", err.Error())
 	}
@@ -380,13 +383,14 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 	// }
 
 	//var inputs []proto.Message
-	offset := 0
-	fmt.Println("binData", binData)
-	fmt.Println(len(binData))
-	for offset < len(binData) {
+	reader := bufio.NewReader(bytes.NewBuffer(binData))
+	for {
+
 		msg := dynamicpb.NewMessage(md)
-		err := proto.UnmarshalOptions{}.Unmarshal(binData[offset:], msg)
-		if err == io.ErrUnexpectedEOF {
+
+		err := protodelim.UnmarshalFrom(reader, msg)
+
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
@@ -394,7 +398,6 @@ func createPayloadsFromBinCountDelimited(binData []byte, mtd protoreflect.Method
 		}
 
 		inputs = append(inputs, msg)
-		offset += proto.MarshalOptions{}.Size(msg) // Adjust this line as needed to move the offset correctly
 	}
 
 	return inputs, nil
