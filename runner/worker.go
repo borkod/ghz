@@ -224,7 +224,7 @@ func (w *Worker) makeUnaryRequest(ctx *context.Context, reqMD *metadata.MD, inpu
 		// TODO: perform w.config.log.debugw
 		return err
 	}
-	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.Name()))
 	resv1, resErr := w.stub.InvokeRpc(*ctx, mtd, input, callOptions...)
 	res := protoadapt.MessageV2Of(resv1)
 
@@ -256,7 +256,7 @@ func (w *Worker) makeClientStreamingRequest(ctx *context.Context,
 		// TODO: perform w.config.log.debugw
 		return err
 	}
-	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.Name()))
 
 	str, err = w.stub.InvokeRpcClientStream(*ctx, mtd, callOptions...)
 	if err != nil {
@@ -384,7 +384,7 @@ func (w *Worker) makeClientStreamingRequest(ctx *context.Context,
 
 func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamicpb.Message, streamInterceptor StreamInterceptor) error {
 	if w.mtd.IsStreamingClient() || !w.mtd.IsStreamingServer() {
-		return fmt.Errorf("InvokeRpcServerStream is for server-streaming methods; %q is %s", w.mtd.FullName(), methodType(w.mtd))
+		return fmt.Errorf("InvokeRpcServerStream is for server-streaming methods; %q is %s", w.mtd.Name(), methodType(w.mtd))
 	}
 	if err := checkMessageType(w.mtd.Input(), input); err != nil {
 		return err
@@ -403,7 +403,7 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 		// TODO: perform w.config.log.debugw
 		return err
 	}
-	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.Name()))
 
 	str, err := w.stub.InvokeRpcServerStream(callCtx, mtd, input, callOptions...)
 
@@ -411,7 +411,7 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 		if w.config.hasLog {
 			w.config.log.Errorw("Invoke Server Streaming RPC call error: "+err.Error(), "workerID", w.workerID,
 				"call type", "server-streaming",
-				"call", w.mtd.FullName(),
+				"call", w.mtd.Name(),
 				"input", input, "error", err)
 		}
 
@@ -450,7 +450,7 @@ func (w *Worker) makeServerStreamingRequest(ctx *context.Context, input *dynamic
 		res, err := str.RecvMsg()
 		if w.config.hasLog {
 			w.config.log.Debugw("Receive message", "workerID", w.workerID, "call type", "server-streaming",
-				"call", w.mtd.FullName(),
+				"call", w.mtd.Name(),
 				"response", res, "error", err)
 		}
 
@@ -530,7 +530,7 @@ func (w *Worker) makeBidiRequest(ctx *context.Context,
 		// TODO: perform w.config.log.debugw
 		return err
 	}
-	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.FullName()))
+	mtd := fd.FindService(string(w.mtd.Parent().FullName())).FindMethodByName(string(w.mtd.Name()))
 
 	str, err := w.stub.InvokeRpcBidiStream(*ctx, mtd, callOptions...)
 
